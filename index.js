@@ -1,6 +1,18 @@
 const fs     = require('fs')
 const path   = require('path')
 
+// ── Polyfill fetch: gaxios (googleapis dep) ทำ dynamic import('node-fetch') ──
+// ── ใน pkg สิ่งนี้ fail — inject global.fetch จาก node-fetch v2 (CJS) แทน ──
+if (typeof globalThis.fetch === 'undefined') {
+  try {
+    const nf = require('node-fetch')
+    globalThis.fetch    = nf.default || nf
+    globalThis.Headers  = nf.Headers
+    globalThis.Request  = nf.Request
+    globalThis.Response = nf.Response
+  } catch {}
+}
+
 // ── Polyfill: pkg bundles Node.js with minimal ICU (utf-8 + utf-16le only) ──
 // fontkit uses TextDecoder('ascii'/'windows-1252') which throws in pkg env.
 // ASCII is a subset of UTF-8, so mapping to utf-8 is safe for font name parsing.
