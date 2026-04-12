@@ -19,7 +19,22 @@ if (typeof TextDecoder !== 'undefined') {
 // ── Runtime directory: ใช้ directory ของ .exe เมื่อรันผ่าน pkg ──────────────
 const RUNTIME_DIR = process.pkg ? path.dirname(process.execPath) : __dirname
 
-require('dotenv').config({ path: path.join(RUNTIME_DIR, '.env') })
+// Load .env — ลองหลาย path เผื่อ Windows bat เปลี่ยน cwd
+;(function loadEnv() {
+  const dirs = [RUNTIME_DIR, process.cwd()]
+  const names = ['.env', 'env']  // Windows บางครั้ง copy มาเป็น "env" ไม่มีจุด
+  for (const dir of dirs) {
+    for (const name of names) {
+      const p = path.join(dir, name)
+      if (fs.existsSync(p)) {
+        require('dotenv').config({ path: p })
+        console.log('Loaded env from:', p)
+        return
+      }
+    }
+  }
+  console.warn('Warning: env file not found in', dirs)
+})()
 
 // ── Error logging — เขียน error ลง bot-error.log เสมอ ───────────────────────
 const LOG_PATH = path.join(RUNTIME_DIR, 'bot-error.log')
