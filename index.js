@@ -132,154 +132,167 @@ function parseExcel(buffer) {
 }
 
 // ── QR / Barcode scanner ──────────────────────────────────────────────────────
-function safeCrop(img, x, y, w, h) {
-  const W = img.bitmap.width, H = img.bitmap.height
-  x = Math.max(0, Math.round(x)); y = Math.max(0, Math.round(y))
-  w = Math.min(W - x, Math.round(w)); h = Math.min(H - y, Math.round(h))
-  if (w < 60 || h < 60) return null
-  return img.clone().crop(x, y, w, h)
+const sharp = require('sharp')
+
+// ── Pre-warm zxing-wasm ───────────────────────────────────────────────────────
+let _zxing = null
+async function getZxing() {
+  if (_zxing === false) return null
+  if (_zxing) return _zxing
+  try { const m = await import('zxing-wasm/reader'); _zxing = m.readBarcodes }
+  catch { _zxing = false }
+  return _zxing || null
 }
 
-// Normalize ภาพให้ไม่เกิน 1200px ก่อนทำอะไร — ลด RAM และความเร็ว
-function normalize(img) {
-  const W = img.bitmap.width
-  if (W > 1400) return img.clone().resize(1200, Jimp.AUTO)
-  if (W < 400)  return img.clone().resize(800, Jimp.AUTO)
-  return img.clone()
-}
-
-// Fast-path crops: 6 zones ที่สำคัญที่สุด
-function getFastCrops(img) {
-  const W = img.bitmap.width, H = img.bitmap.height
-  const crops = [], add = (x,y,w,h) => { const c=safeCrop(img,x,y,w,h); if(c) crops.push(c) }
-  add(0,       0,       W,       H)        // ทั้งรูป
-  add(0,       0,       W,       H*0.5)    // ครึ่งบน
-  add(0,       H*0.5,   W,       H*0.5)    // ครึ่งล่าง
-  add(W*0.1,   H*0.1,   W*0.8,   H*0.8)   // center 80%
-  add(0,       H*0.25,  W,       H*0.5)    // แถบกลาง
-  add(W*0.25,  H*0.25,  W*0.5,   H*0.5)   // center 50%
-  return crops
-}
-
-// Deep-path crops: เพิ่ม quadrant และ strips สำหรับรูปที่อ่านยาก
-function getDeepCrops(img) {
-  const W = img.bitmap.width, H = img.bitmap.height
-  const crops = [], add = (x,y,w,h) => { const c=safeCrop(img,x,y,w,h); if(c) crops.push(c) }
-  add(0,       0,       W*0.5,   H*0.5)
-  add(W*0.5,   0,       W*0.5,   H*0.5)
-  add(0,       H*0.5,   W*0.5,   H*0.5)
-  add(W*0.5,   H*0.5,   W*0.5,   H*0.5)
-  add(0,       H*0.15,  W,       H*0.35)
-  add(0,       H*0.5,   W,       H*0.35)
-  return crops
-}
-
-function decodeQR(img, inv) {
+// ── Decoders ──────────────────────────────────────────────────────────────────
+async function decodeZxing(imageData) {
+  const rb = await getZxing()
+  if (!rb) return null
   try {
-    if (!img?.bitmap?.width || !img?.bitmap?.height || !img?.bitmap?.data) return null
-    const { data, width, height } = img.bitmap
-    const r = jsQR(data, width, height, { inversionAttempts: inv })
-    return r ? r.data.trim() : null
+    const r = await rb(imageData, { tryHarder: true, formats: [] })
+    return r?.[0]?.text?.trim() || null
   } catch { return null }
 }
 
-// ลอง decode QR จาก 1 รูป ด้วย 4 มุมหลัก
-function tryQR(v) {
-  for (const inv of ['dontInvert', 'onlyInvert']) {
-    for (const angle of [0, 90, 180, 270]) {
-      const rotated = angle === 0 ? v : v.clone().rotate(angle)
-      const r = decodeQR(rotated, inv)
-      if (r) return r
-    }
-  }
-  return null
-}
-
-// ลอง decode QR พร้อม diagonal angles (ช้ากว่า ใช้เฉพาะ deep pass)
-function tryQRDeep(v) {
-  for (const inv of ['dontInvert', 'onlyInvert']) {
-    for (const angle of [0, 45, 90, 135, 180, 225, 270, 315]) {
-      const rotated = angle === 0 ? v : v.clone().rotate(angle)
-      const r = decodeQR(rotated, inv)
-      if (r) return r
-    }
-  }
-  return null
-}
-
-async function scanQR(base) {
-  // FAST PASS: ภาพปกติ + grayscale contrast, 4 มุม
-  for (const crop of getFastCrops(base)) {
-    const variants = [
-      crop,
-      crop.clone().grayscale().contrast(0.5),
-      crop.clone().grayscale().contrast(0.8),
-    ]
-    for (const v of variants) {
-      const r = tryQR(v); if (r) return r
-    }
-  }
-  // DEEP PASS: เพิ่ม crop + sharpening + 8 มุม (เฉพาะรูปยาก)
-  for (const crop of getDeepCrops(base)) {
-    const variants = [
-      crop.clone().grayscale().contrast(0.6),
-      crop.clone().grayscale().convolute([[0,-1,0],[-1,5,-1],[0,-1,0]]),
-      crop.clone().grayscale().contrast(0.7).convolute([[0,-1,0],[-1,5,-1],[0,-1,0]]),
-    ]
-    for (const v of variants) {
-      const r = tryQRDeep(v); if (r) return r
-    }
-  }
-  return null
-}
-
-let _readBarcodes = null
-let _zxingUnavailable = false
-async function getZxing() {
-  if (_zxingUnavailable) return null
-  if (_readBarcodes) return _readBarcodes
+function decodeJsQR(imageData) {
   try {
-    const m = await import('zxing-wasm/reader')
-    _readBarcodes = m.readBarcodes
-  } catch {
-    _zxingUnavailable = true
-    return null
-  }
-  return _readBarcodes
+    return jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' })?.data?.trim() || null
+  } catch { return null }
 }
 
-async function scanBarcode(img) {
-  const readBarcodes = await getZxing()
-  if (!readBarcodes) return null
-  const toImageData = v => ({
-    data: new Uint8ClampedArray(v.bitmap.data.buffer),
-    width: v.bitmap.width, height: v.bitmap.height,
-  })
+async function decodeAny(imageData) {
+  return (await decodeZxing(imageData)) || decodeJsQR(imageData) || null
+}
+
+// ── Sharp preprocessing → ImageData ──────────────────────────────────────────
+// sharp runs natively (libvips) — เร็วกว่า jimp 10× และ threshold ตัด glare ได้จริง
+async function sharpToImageData(input, options = {}) {
   try {
-    for (const crop of [...getFastCrops(img), ...getDeepCrops(img)]) {
-      for (const angle of [0, 90, 180, 270]) {
-        try {
-          const rotated = angle === 0 ? crop : crop.clone().rotate(angle)
-          if (!rotated?.bitmap?.width) continue
-          const results = await readBarcodes(toImageData(rotated), { tryHarder: true })
-          const text = results?.[0]?.text?.trim()
-          if (text) return text
-        } catch { /* skip */ }
-      }
+    const { width, threshold = false, sharpen = false } = options
+    let p = sharp(input).rotate()  // auto-rotate by EXIF
+    if (width)    p = p.resize(width, null, { fit: 'inside', withoutEnlargement: false })
+    if (sharpen)  p = p.sharpen({ sigma: 1.5, m1: 1, m2: 2 })
+    p = p.grayscale()
+    if (threshold) p = p.threshold(128)  // binary: ตัด glare ออกเป็น pure black/white
+    const { data, info } = await p.raw().toBuffer({ resolveWithObject: true })
+    // grayscale raw = 1 channel → แปลงเป็น RGBA สำหรับ zxing/jsQR
+    const rgba = Buffer.alloc(info.width * info.height * 4)
+    for (let i = 0; i < info.width * info.height; i++) {
+      const v = data[i]
+      rgba[i*4] = v; rgba[i*4+1] = v; rgba[i*4+2] = v; rgba[i*4+3] = 255
     }
-  } catch (err) { console.error('Barcode scan error:', err.message) }
-  return null
+    return { data: new Uint8ClampedArray(rgba), width: info.width, height: info.height }
+  } catch { return null }
 }
 
+// ── Crop buffer ด้วย sharp (ไม่ต้องโหลด jimp เลย) ───────────────────────────
+async function sharpCrop(buffer, meta, x, y, w, h) {
+  try {
+    x = Math.max(0, Math.round(x)); y = Math.max(0, Math.round(y))
+    w = Math.min(meta.width - x, Math.round(w))
+    h = Math.min(meta.height - y, Math.round(h))
+    if (w < 60 || h < 60) return null
+    return await sharp(buffer).extract({ left: x, top: y, width: w, height: h }).toBuffer()
+  } catch { return null }
+}
+
+// ── Google Vision fallback — locate label bounding box ───────────────────────
+async function visionLocateLabel(imageBuffer) {
+  try {
+    const { google } = require('googleapis')
+    const Sheets = require('./sheets')
+    if (!Sheets.SHEET_ID()) return null  // ไม่มี credentials ให้ skip
+    const auth = (() => {
+      const credentials = process.env.GOOGLE_SERVICE_ACCOUNT
+        ? JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT)
+        : JSON.parse(fs.readFileSync(path.join(RUNTIME_DIR, 'credentials.json'), 'utf8'))
+      return new google.auth.GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/cloud-platform'] })
+    })()
+    const vision = google.vision({ version: 'v1', auth })
+    const base64 = imageBuffer.toString('base64')
+    const res = await vision.images.annotate({
+      requestBody: { requests: [{ image: { content: base64 }, features: [{ type: 'DOCUMENT_TEXT_DETECTION' }] }] }
+    })
+    const pages = res.data.responses?.[0]?.fullTextAnnotation?.pages
+    if (!pages?.length) return null
+    // หา bounding box ของ text block ทั้งหมด
+    const verts = res.data.responses[0].textAnnotations?.[0]?.boundingPoly?.vertices
+    if (!verts?.length) return null
+    const xs = verts.map(v => v.x || 0), ys = verts.map(v => v.y || 0)
+    return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) }
+  } catch { return null }
+}
+
+// ── Main scan pipeline ────────────────────────────────────────────────────────
 async function scan(imageBuffer) {
-  let img
-  try { img = await Jimp.read(imageBuffer) } catch { return null }
-  // normalize ภาพก่อนเสมอ — ลด RAM และเวลา
-  const base = normalize(img)
-  const qr = await scanQR(base)
-  if (qr) return { text: qr, type: 'QR' }
-  const bc = await scanBarcode(base)
-  if (bc) return { text: bc, type: 'Barcode' }
+  // อ่าน metadata ก่อน (ไม่โหลดทั้งรูปเข้า memory)
+  let meta
+  try { meta = await sharp(imageBuffer).rotate().metadata() } catch { return null }
+  const W = meta.width || 1000, H = meta.height || 1000
+
+  // normalize: cap ที่ 1400px, เพิ่มถ้าเล็กกว่า 500px
+  const targetW = W > 1400 ? 1300 : W < 500 ? 800 : null
+  const baseBuffer = targetW
+    ? await sharp(imageBuffer).rotate().resize(targetW, null, { fit: 'inside' }).toBuffer()
+    : await sharp(imageBuffer).rotate().toBuffer()
+  const baseMeta = await sharp(baseBuffer).metadata()
+  const BW = baseMeta.width, BH = baseMeta.height
+
+  // ── STAGE 1: ทั้งรูป — 4 variants พร้อมกัน ────────────────────────────────
+  const stage1 = await Promise.all([
+    sharpToImageData(baseBuffer),                                         // raw
+    sharpToImageData(baseBuffer, { sharpen: true }),                      // sharpen
+    sharpToImageData(baseBuffer, { threshold: true }),                    // binary (glare killer)
+    sharpToImageData(baseBuffer, { sharpen: true, threshold: true }),     // sharpen + binary
+  ])
+  for (const id of stage1) { if (!id) continue; const r = await decodeAny(id); if (r) return { text: r, type: 'Code' } }
+
+  // ── STAGE 2: overlapping zones + zoom — concurrent ────────────────────────
+  const zones = [
+    [0,       0,       BW*0.6,  BH*0.6 ],
+    [BW*0.4,  0,       BW*0.6,  BH*0.6 ],
+    [0,       BH*0.4,  BW*0.6,  BH*0.6 ],
+    [BW*0.4,  BH*0.4,  BW*0.6,  BH*0.6 ],
+    [BW*0.1,  BH*0.1,  BW*0.8,  BH*0.8 ],
+    [0,       BH*0.2,  BW,      BH*0.6 ],
+  ]
+  const stage2 = await Promise.all(zones.map(async ([x, y, w, h]) => {
+    const crop = await sharpCrop(baseBuffer, baseMeta, x, y, w, h)
+    if (!crop) return null
+    // zoom 2× ให้ QR เล็กมี pixel พอ
+    const id = await sharpToImageData(crop, { width: Math.min(Math.round(w)*2, 1200), sharpen: true, threshold: true })
+    return id ? decodeAny(id) : null
+  }))
+  const found2 = stage2.find(r => r)
+  if (found2) return { text: found2, type: 'Code' }
+
+  // ── STAGE 3: 3×3 grid + zoom 3× — concurrent ─────────────────────────────
+  const gw = Math.floor(BW/3), gh = Math.floor(BH/3)
+  const cells = []
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) cells.push([c*gw, r*gh, gw, gh])
+
+  const stage3 = await Promise.all(cells.map(async ([x, y, w, h]) => {
+    const crop = await sharpCrop(baseBuffer, baseMeta, x, y, w, h)
+    if (!crop) return null
+    const id = await sharpToImageData(crop, { width: Math.min(gw*3, 900), sharpen: true, threshold: true })
+    return id ? decodeAny(id) : null
+  }))
+  const found3 = stage3.find(r => r)
+  if (found3) return { text: found3, type: 'Code' }
+
+  // ── STAGE 4 (fallback): Google Vision หา bbox ของฉลาก แล้ว crop + scan ───
+  const bbox = await visionLocateLabel(imageBuffer)
+  if (bbox) {
+    const padding = 20
+    const crop = await sharpCrop(baseBuffer, baseMeta,
+      bbox.x - padding, bbox.y - padding,
+      bbox.w + padding*2, bbox.h + padding*2)
+    if (crop) {
+      const id = await sharpToImageData(crop, { width: 1200, sharpen: true, threshold: true })
+      if (id) { const r = await decodeAny(id); if (r) return { text: r, type: 'Code' } }
+    }
+  }
+
   return null
 }
 
@@ -567,77 +580,102 @@ client.on(Events.MessageCreate, async (message) => {
     return
   }
 
-  // ── Image scan ───────────────────────────────────────────────────────────────
-  const imageFile = message.attachments.find(a => a.contentType?.startsWith('image/'))
-  if (imageFile) {
-    try { await message.react('🔍') } catch {}
+  // ── Image scan — fetch + scan ทุกรูปพร้อมกัน (Promise.all) ──────────────────
+  const imageFiles = [...message.attachments.values()].filter(a => a.contentType?.startsWith('image/'))
+  if (imageFiles.length === 0) return
 
+  try { await message.react('🔍') } catch {}
+
+  const now = new Date().toISOString()
+
+  // ดาวน์โหลด + scan ทุกรูปพร้อมกัน
+  const scanResults = await Promise.all(imageFiles.map(async (imageFile) => {
     try {
       const res    = await fetch(imageFile.url)
       const buffer = await res.buffer()
       const found  = await scan(buffer)
+      return { imageFile, buffer, found }
+    } catch (err) {
+      console.error('Scan error:', err)
+      return { imageFile, buffer: null, found: null }
+    }
+  }))
 
-      if (!found) {
-        await message.reply('⚠️ ไม่พบ QR Code หรือ Barcode\nลองถ่ายให้ชัดขึ้น ตรงขึ้น หรือใกล้กว่านี้')
-        return
-      }
+  const results = []
+  const noRead  = []
+
+  for (const { imageFile, buffer, found } of scanResults) {
+    try {
+      if (!found) { noRead.push(imageFile.name ?? 'ไม่ทราบชื่อ'); continue }
 
       const { text: code, type } = found
-      const label = type === 'Barcode' ? '📊 Barcode' : '📱 QR Code'
-      const now   = new Date().toISOString()
 
       // ── Google Sheets mode ──
       if (Sheets.SHEET_ID()) {
         try {
           const parcel = await Sheets.lookupParcel(code)
           if (!parcel) {
-            await message.reply(`❌ ยังไม่เข้ารับ หรือ ไม่พบข้อมูลในระบบ\n${label}: \`${code}\``)
-            return
+            results.push({ code, type, status: 'notfound' }); continue
           }
           if (parcel.received) {
-            await message.reply(`✅ เข้ารับพัสดุแล้ว *(รับก่อนหน้านี้แล้ว)*\n${label}: \`${code}\`\n📄 Tab: ${parcel.tab}`)
-            return
+            results.push({ code, type, status: 'already', tab: parcel.tab }); continue
           }
           await Sheets.markReceived(code, now)
-          // Save thumbnail locally for PDF
           const imgPath = await saveThumbnail(code, buffer)
-          // Keep a local record for PDF image embedding
           const db = loadDb()
           if (!db.parcels[code]) db.parcels[code] = {}
           db.parcels[code].imagePath  = imgPath
           db.parcels[code].received   = true
           db.parcels[code].receivedAt = now
           saveDb(db)
-          await message.reply(`✅ เข้ารับพัสดุแล้ว\n${label}: \`${code}\`\n📄 อัปเดต Sheet: **${parcel.tab}**`)
+          results.push({ code, type, status: 'ok', tab: parcel.tab })
         } catch (e) {
           console.error('Sheets scan error:', e.message)
-          await message.reply(`❌ Google Sheets error: ${e.message}`)
+          results.push({ code, type, status: 'error', err: e.message })
         }
-        return
+        continue
       }
 
       // ── JSON db fallback ──
       const db     = loadDb()
       const parcel = db.parcels[code]
-      if (parcel) {
-        if (parcel.received) {
-          await message.reply(`✅ เข้ารับพัสดุแล้ว *(รับก่อนหน้านี้แล้ว)*\n${label}: \`${code}\``)
-        } else {
-          parcel.received   = true
-          parcel.receivedAt = now
-          parcel.imagePath  = await saveThumbnail(code, buffer) ?? null
-          saveDb(db)
-          await message.reply(`✅ เข้ารับพัสดุแล้ว\n${label}: \`${code}\``)
-        }
+      if (!parcel) {
+        results.push({ code, type, status: 'notfound' })
+      } else if (parcel.received) {
+        results.push({ code, type, status: 'already' })
       } else {
-        await message.reply(`❌ ยังไม่เข้ารับ หรือ ไม่พบข้อมูลในระบบ\n${label}: \`${code}\``)
+        parcel.received   = true
+        parcel.receivedAt = now
+        parcel.imagePath  = await saveThumbnail(code, buffer) ?? null
+        saveDb(db)
+        results.push({ code, type, status: 'ok' })
       }
     } catch (err) {
       console.error('Scan error:', err)
-      await message.reply('❌ เกิดข้อผิดพลาดในการสแกนรูปภาพ')
+      noRead.push(imageFile.name ?? 'ไม่ทราบชื่อ')
     }
   }
+
+  // ── สรุปผลทั้งหมดในข้อความเดียว ─────────────────────────────────────────
+  const total = imageFiles.length
+  const lines = []
+
+  for (const r of results) {
+    const label = r.type === 'Barcode' ? '📊' : '📱'
+    if      (r.status === 'ok')       lines.push(`✅ ${label} \`${r.code}\`${r.tab ? ` — ${r.tab}` : ''}`)
+    else if (r.status === 'already')  lines.push(`🔁 ${label} \`${r.code}\` *(รับแล้ว)*`)
+    else if (r.status === 'notfound') lines.push(`❌ ${label} \`${r.code}\` — ไม่พบในระบบ`)
+    else                              lines.push(`⚠️ ${label} \`${r.code}\` — ${r.err}`)
+  }
+  for (const name of noRead) lines.push(`⚠️ อ่านไม่ได้: ${name}`)
+
+  const okCount = results.filter(r => r.status === 'ok').length
+  const header  = `📦 สแกน **${total}** รูป | ✅ เข้ารับ **${okCount}** | ❌ อ่านไม่ได้ **${noRead.length}**`
+  await message.reply([header, ...lines].join('\n'))
 })
 
 // ── Start ─────────────────────────────────────────────────────────────────────
-ensureFont().then(() => client.login(DISCORD_TOKEN))
+ensureFont().then(() => {
+  getZxing()  // pre-warm zxing-wasm ก่อน bot online เพื่อลด cold-start delay
+  client.login(DISCORD_TOKEN)
+})
