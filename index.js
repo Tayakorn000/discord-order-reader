@@ -6,6 +6,24 @@ const RUNTIME_DIR = process.pkg ? path.dirname(process.execPath) : __dirname
 
 require('dotenv').config({ path: path.join(RUNTIME_DIR, '.env') })
 
+// ── Error logging — เขียน error ลง bot-error.log เสมอ ───────────────────────
+const LOG_PATH = path.join(RUNTIME_DIR, 'bot-error.log')
+function writeLog(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}\n`
+  try { fs.appendFileSync(LOG_PATH, line) } catch {}
+  console.error(msg)
+}
+process.on('uncaughtException', err => {
+  writeLog('CRASH: ' + err.stack)
+  console.error('\n=== BOT CRASHED ===')
+  console.error(err.message)
+  console.error('\nดู bot-error.log ในโฟลเดอร์เดียวกับ Discord Bot.exe')
+  process.exitCode = 1
+})
+process.on('unhandledRejection', err => {
+  writeLog('UNHANDLED: ' + (err?.stack || err))
+})
+
 const { Client, GatewayIntentBits, Events, AttachmentBuilder } = require('discord.js')
 const PDFDocument = require('pdfkit')
 const XLSX   = require('xlsx')
