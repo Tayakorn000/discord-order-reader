@@ -1,4 +1,10 @@
-require('dotenv').config()
+const fs     = require('fs')
+const path   = require('path')
+
+// ── Runtime directory: ใช้ directory ของ .exe เมื่อรันผ่าน pkg ──────────────
+const RUNTIME_DIR = process.pkg ? path.dirname(process.execPath) : __dirname
+
+require('dotenv').config({ path: path.join(RUNTIME_DIR, '.env') })
 
 const { Client, GatewayIntentBits, Events, AttachmentBuilder } = require('discord.js')
 const PDFDocument = require('pdfkit')
@@ -6,15 +12,13 @@ const XLSX   = require('xlsx')
 const Jimp   = require('jimp')
 const jsQR   = require('jsqr')
 const fetch  = require('node-fetch')
-const fs     = require('fs')
-const path   = require('path')
 const Sheets = require('./sheets')
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
-const DB_PATH     = path.join(__dirname, 'db.json')
-const IMAGES_DIR  = path.join(__dirname, 'images')
-const FONT_PATH   = path.join(__dirname, 'Sarabun-Regular.ttf')
-const FONT_BOLD   = path.join(__dirname, 'Sarabun-Bold.ttf')
+const DB_PATH     = path.join(RUNTIME_DIR, 'db.json')
+const IMAGES_DIR  = path.join(RUNTIME_DIR, 'images')
+const FONT_PATH   = path.join(RUNTIME_DIR, 'Sarabun-Regular.ttf')
+const FONT_BOLD   = path.join(RUNTIME_DIR, 'Sarabun-Bold.ttf')
 
 if (!fs.existsSync(IMAGES_DIR)) fs.mkdirSync(IMAGES_DIR, { recursive: true })
 
