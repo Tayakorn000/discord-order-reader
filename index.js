@@ -259,10 +259,10 @@ async function generatePDF(db) {
 
   // Footer
   y += 50
-  doc.font(fontBold).fontSize(56).fillColor('#000000')
+  doc.font(fontBold).fontSize(40).fillColor('#000000')
     .text('รบกวนพี่ๆขนส่งเซ็นต์รับด้วยนะคะ', ML, y, { width: TABLE_W, align: 'center' })
-  y += 80
-  doc.font(font).fontSize(56).fillColor('#000000')
+  y += 60
+  doc.font(font).fontSize(40).fillColor('#000000')
     .text('(................................................)', ML, y, { width: TABLE_W, align: 'center' })
 
   doc.end()
