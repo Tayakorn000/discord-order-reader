@@ -8,6 +8,14 @@ const { google } = require('googleapis')
 const fs   = require('fs')
 const path = require('path')
 
+// ── Force gaxios to use CJS node-fetch (pkg compat) ──────────────────────────
+try {
+  const gaxios  = require('gaxios')
+  const nodeFetch = require('node-fetch')
+  const fetch = nodeFetch.default || nodeFetch
+  gaxios.instance.defaults.fetchImplementation = fetch
+} catch {}
+
 const SHEET_ID = process.env.GOOGLE_SHEET_ID
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
