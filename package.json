@@ -3,8 +3,23 @@
   "version": "2.0.0",
   "description": "Discord bot — robust QR scanning + parcel tracking + Excel export",
   "main": "index.js",
+  "bin": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "build:win": "pkg . --targets node18-win-x64 --output dist/\"Discord Bot.exe\" --compress GZip"
+  },
+  "pkg": {
+    "scripts": [
+      "index.js",
+      "sheets.js"
+    ],
+    "assets": [
+      "node_modules/pdfkit/js/**/*",
+      "node_modules/pdfkit/lib/**/*"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ]
   },
   "dependencies": {
     "discord.js": "^14.14.1",
@@ -16,5 +31,8 @@
     "pdfkit": "^0.18.0",
     "xlsx": "^0.18.5",
     "zxing-wasm": "^3.0.2"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
   }
 }

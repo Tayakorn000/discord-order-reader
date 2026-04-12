@@ -156,8 +156,17 @@ async function scanQR(img) {
 }
 
 let _readBarcodes = null
+let _zxingUnavailable = false
 async function getZxing() {
-  if (!_readBarcodes) { const m = await import('zxing-wasm/reader'); _readBarcodes = m.readBarcodes }
+  if (_zxingUnavailable) return null
+  if (_readBarcodes) return _readBarcodes
+  try {
+    const m = await import('zxing-wasm/reader')
+    _readBarcodes = m.readBarcodes
+  } catch {
+    _zxingUnavailable = true
+    return null
+  }
   return _readBarcodes
 }
 
