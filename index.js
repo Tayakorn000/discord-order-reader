@@ -128,56 +128,38 @@ function safeCrop(img, x, y, w, h) {
   return img.clone().crop(x, y, w, h)
 }
 
-// 16 crop zones — full image, halves, thirds, quarters, center, corners, strips
-function getCrops(img) {
+// Normalize ภาพให้ไม่เกิน 1200px ก่อนทำอะไร — ลด RAM และความเร็ว
+function normalize(img) {
+  const W = img.bitmap.width
+  if (W > 1400) return img.clone().resize(1200, Jimp.AUTO)
+  if (W < 400)  return img.clone().resize(800, Jimp.AUTO)
+  return img.clone()
+}
+
+// Fast-path crops: 6 zones ที่สำคัญที่สุด
+function getFastCrops(img) {
   const W = img.bitmap.width, H = img.bitmap.height
-  const crops = []
-  const add = (x, y, w, h) => { const c = safeCrop(img, x, y, w, h); if (c) crops.push(c) }
-  // Full image
-  add(0,         0,         W,        H)
-  // Horizontal halves
-  add(0,         0,         W,        H * 0.5)
-  add(0,         H * 0.5,   W,        H * 0.5)
-  // Horizontal thirds (top/mid/bottom strips)
-  add(0,         0,         W,        H * 0.35)
-  add(0,         H * 0.33,  W,        H * 0.34)
-  add(0,         H * 0.65,  W,        H * 0.35)
-  // Center region (label usually here)
-  add(W * 0.05,  H * 0.1,   W * 0.9,  H * 0.8)
-  add(W * 0.1,   H * 0.15,  W * 0.8,  H * 0.7)
-  // Quadrants
-  add(0,         0,         W * 0.5,  H * 0.5)
-  add(W * 0.5,   0,         W * 0.5,  H * 0.5)
-  add(0,         H * 0.5,   W * 0.5,  H * 0.5)
-  add(W * 0.5,   H * 0.5,   W * 0.5,  H * 0.5)
-  // Wide center strip (barcode usually here)
-  add(0,         H * 0.2,   W,        H * 0.6)
-  add(W * 0.05,  H * 0.25,  W * 0.9,  H * 0.5)
+  const crops = [], add = (x,y,w,h) => { const c=safeCrop(img,x,y,w,h); if(c) crops.push(c) }
+  add(0,       0,       W,       H)        // ทั้งรูป
+  add(0,       0,       W,       H*0.5)    // ครึ่งบน
+  add(0,       H*0.5,   W,       H*0.5)    // ครึ่งล่าง
+  add(W*0.1,   H*0.1,   W*0.8,   H*0.8)   // center 80%
+  add(0,       H*0.25,  W,       H*0.5)    // แถบกลาง
+  add(W*0.25,  H*0.25,  W*0.5,   H*0.5)   // center 50%
   return crops
 }
 
-// Normalize large images first for speed, then provide multiple contrast/brightness variants
-function preprocess(crop) {
-  const W = crop.bitmap.width, H = crop.bitmap.height
-  // Normalize: if very large, scale down to ~1200px wide for speed
-  const base = W > 1400
-    ? crop.clone().resize(1200, Jimp.AUTO)
-    : W < 400
-    ? crop.clone().resize(Math.min(W * 3, 1200), Jimp.AUTO)
-    : crop.clone()
-
-  return [
-    base.clone(),
-    base.clone().grayscale(),
-    base.clone().grayscale().contrast(0.4),
-    base.clone().grayscale().contrast(0.6),
-    base.clone().grayscale().contrast(0.8),
-    base.clone().grayscale().contrast(0.9).brightness(0.05),
-    base.clone().grayscale().contrast(0.5).brightness(-0.1),
-    // Sharpened variants — help with blurry/angled photos
-    base.clone().grayscale().convolute([[0,-1,0],[-1,5,-1],[0,-1,0]]),
-    base.clone().grayscale().contrast(0.6).convolute([[0,-1,0],[-1,5,-1],[0,-1,0]]),
-  ]
+// Deep-path crops: เพิ่ม quadrant และ strips สำหรับรูปที่อ่านยาก
+function getDeepCrops(img) {
+  const W = img.bitmap.width, H = img.bitmap.height
+  const crops = [], add = (x,y,w,h) => { const c=safeCrop(img,x,y,w,h); if(c) crops.push(c) }
+  add(0,       0,       W*0.5,   H*0.5)
+  add(W*0.5,   0,       W*0.5,   H*0.5)
+  add(0,       H*0.5,   W*0.5,   H*0.5)
+  add(W*0.5,   H*0.5,   W*0.5,   H*0.5)
+  add(0,       H*0.15,  W,       H*0.35)
+  add(0,       H*0.5,   W,       H*0.35)
+  return crops
 }
 
 function decodeQR(img, inv) {
@@ -189,19 +171,51 @@ function decodeQR(img, inv) {
   } catch { return null }
 }
 
-// All 8 angles: 0°, 45°, 90°, 135°, 180°, 225°, 270°, 315°
-const QR_ANGLES = [0, 45, 90, 135, 180, 225, 270, 315]
+// ลอง decode QR จาก 1 รูป ด้วย 4 มุมหลัก
+function tryQR(v) {
+  for (const inv of ['dontInvert', 'onlyInvert']) {
+    for (const angle of [0, 90, 180, 270]) {
+      const rotated = angle === 0 ? v : v.clone().rotate(angle)
+      const r = decodeQR(rotated, inv)
+      if (r) return r
+    }
+  }
+  return null
+}
 
-async function scanQR(img) {
-  for (const crop of getCrops(img)) {
-    for (const v of preprocess(crop)) {
-      for (const inv of ['dontInvert', 'onlyInvert']) {
-        for (const angle of QR_ANGLES) {
-          const rotated = angle === 0 ? v : v.clone().rotate(angle)
-          const r = decodeQR(rotated, inv)
-          if (r) return r
-        }
-      }
+// ลอง decode QR พร้อม diagonal angles (ช้ากว่า ใช้เฉพาะ deep pass)
+function tryQRDeep(v) {
+  for (const inv of ['dontInvert', 'onlyInvert']) {
+    for (const angle of [0, 45, 90, 135, 180, 225, 270, 315]) {
+      const rotated = angle === 0 ? v : v.clone().rotate(angle)
+      const r = decodeQR(rotated, inv)
+      if (r) return r
+    }
+  }
+  return null
+}
+
+async function scanQR(base) {
+  // FAST PASS: ภาพปกติ + grayscale contrast, 4 มุม
+  for (const crop of getFastCrops(base)) {
+    const variants = [
+      crop,
+      crop.clone().grayscale().contrast(0.5),
+      crop.clone().grayscale().contrast(0.8),
+    ]
+    for (const v of variants) {
+      const r = tryQR(v); if (r) return r
+    }
+  }
+  // DEEP PASS: เพิ่ม crop + sharpening + 8 มุม (เฉพาะรูปยาก)
+  for (const crop of getDeepCrops(base)) {
+    const variants = [
+      crop.clone().grayscale().contrast(0.6),
+      crop.clone().grayscale().convolute([[0,-1,0],[-1,5,-1],[0,-1,0]]),
+      crop.clone().grayscale().contrast(0.7).convolute([[0,-1,0],[-1,5,-1],[0,-1,0]]),
+    ]
+    for (const v of variants) {
+      const r = tryQRDeep(v); if (r) return r
     }
   }
   return null
@@ -222,28 +236,23 @@ async function getZxing() {
   return _readBarcodes
 }
 
-// Barcode angles: 0°, 45°, 90°, 135°, 180°, 270° — cover tilted barcodes
-const BC_ANGLES = [0, 45, 90, 135, 180, 270]
-
 async function scanBarcode(img) {
+  const readBarcodes = await getZxing()
+  if (!readBarcodes) return null
+  const toImageData = v => ({
+    data: new Uint8ClampedArray(v.bitmap.data.buffer),
+    width: v.bitmap.width, height: v.bitmap.height,
+  })
   try {
-    const readBarcodes = await getZxing()
-    for (const crop of getCrops(img)) {
-      for (const v of preprocess(crop)) {
-        for (const angle of BC_ANGLES) {
-          try {
-            const rotated = angle === 0 ? v : v.clone().rotate(angle)
-            if (!rotated?.bitmap?.width) continue
-            const imageData = {
-              data:   new Uint8ClampedArray(rotated.bitmap.data.buffer),
-              width:  rotated.bitmap.width,
-              height: rotated.bitmap.height,
-            }
-            const results = await readBarcodes(imageData, { tryHarder: true })
-            const text = results?.[0]?.text?.trim()
-            if (text) return text
-          } catch { /* skip this variant */ }
-        }
+    for (const crop of [...getFastCrops(img), ...getDeepCrops(img)]) {
+      for (const angle of [0, 90, 180, 270]) {
+        try {
+          const rotated = angle === 0 ? crop : crop.clone().rotate(angle)
+          if (!rotated?.bitmap?.width) continue
+          const results = await readBarcodes(toImageData(rotated), { tryHarder: true })
+          const text = results?.[0]?.text?.trim()
+          if (text) return text
+        } catch { /* skip */ }
       }
     }
   } catch (err) { console.error('Barcode scan error:', err.message) }
@@ -253,9 +262,11 @@ async function scanBarcode(img) {
 async function scan(imageBuffer) {
   let img
   try { img = await Jimp.read(imageBuffer) } catch { return null }
-  const qr = await scanQR(img)
+  // normalize ภาพก่อนเสมอ — ลด RAM และเวลา
+  const base = normalize(img)
+  const qr = await scanQR(base)
   if (qr) return { text: qr, type: 'QR' }
-  const bc = await scanBarcode(img)
+  const bc = await scanBarcode(base)
   if (bc) return { text: bc, type: 'Barcode' }
   return null
 }
