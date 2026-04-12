@@ -1,0 +1,20 @@
+{
+  "name": "discord-order-reader",
+  "version": "2.0.0",
+  "description": "Discord bot — robust QR scanning + parcel tracking + Excel export",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5",
+    "googleapis": "^171.4.0",
+    "jimp": "^0.22.12",
+    "jsqr": "^1.4.0",
+    "node-fetch": "^2.7.0",
+    "pdfkit": "^0.18.0",
+    "xlsx": "^0.18.5",
+    "zxing-wasm": "^3.0.2"
+  }
+}

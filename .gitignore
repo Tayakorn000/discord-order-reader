@@ -1,0 +1,8 @@
+node_modules/
+.env
+db.json
+images/
+credentials.json
+*.log
+Sarabun-Regular.ttf
+Sarabun-Bold.ttf
