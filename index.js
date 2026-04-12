@@ -76,31 +76,55 @@ function safeCrop(img, x, y, w, h) {
   return img.clone().crop(x, y, w, h)
 }
 
+// 16 crop zones — full image, halves, thirds, quarters, center, corners, strips
 function getCrops(img) {
   const W = img.bitmap.width, H = img.bitmap.height
   const crops = []
   const add = (x, y, w, h) => { const c = safeCrop(img, x, y, w, h); if (c) crops.push(c) }
-  add(0,        0,        W,        H)
-  add(0,        0,        W,        H * 0.5)
-  add(0,        H * 0.5,  W,        H * 0.5)
-  add(0,        H * 0.1,  W,        H * 0.5)
-  add(W * 0.1,  H * 0.1,  W * 0.8,  H * 0.8)
-  add(0,        H * 0.15, W,        H * 0.3)
-  add(W * 0.5,  H * 0.5,  W * 0.5,  H * 0.5)
-  add(0,        0,        W * 0.5,  H * 0.5)
-  add(W * 0.5,  0,        W * 0.5,  H * 0.5)
+  // Full image
+  add(0,         0,         W,        H)
+  // Horizontal halves
+  add(0,         0,         W,        H * 0.5)
+  add(0,         H * 0.5,   W,        H * 0.5)
+  // Horizontal thirds (top/mid/bottom strips)
+  add(0,         0,         W,        H * 0.35)
+  add(0,         H * 0.33,  W,        H * 0.34)
+  add(0,         H * 0.65,  W,        H * 0.35)
+  // Center region (label usually here)
+  add(W * 0.05,  H * 0.1,   W * 0.9,  H * 0.8)
+  add(W * 0.1,   H * 0.15,  W * 0.8,  H * 0.7)
+  // Quadrants
+  add(0,         0,         W * 0.5,  H * 0.5)
+  add(W * 0.5,   0,         W * 0.5,  H * 0.5)
+  add(0,         H * 0.5,   W * 0.5,  H * 0.5)
+  add(W * 0.5,   H * 0.5,   W * 0.5,  H * 0.5)
+  // Wide center strip (barcode usually here)
+  add(0,         H * 0.2,   W,        H * 0.6)
+  add(W * 0.05,  H * 0.25,  W * 0.9,  H * 0.5)
   return crops
 }
 
+// Normalize large images first for speed, then provide multiple contrast/brightness variants
 function preprocess(crop) {
-  const W = crop.bitmap.width
+  const W = crop.bitmap.width, H = crop.bitmap.height
+  // Normalize: if very large, scale down to ~1200px wide for speed
+  const base = W > 1400
+    ? crop.clone().resize(1200, Jimp.AUTO)
+    : W < 400
+    ? crop.clone().resize(Math.min(W * 3, 1200), Jimp.AUTO)
+    : crop.clone()
+
   return [
-    crop.clone(),
-    crop.clone().grayscale().contrast(0.5),
-    crop.clone().grayscale().contrast(0.8).brightness(0.1),
-    crop.clone().grayscale().contrast(0.9),
-    ...(W < 1200 ? [crop.clone().resize(W * 2, Jimp.AUTO).grayscale().contrast(0.6)] : []),
-    ...(W > 1200 ? [crop.clone().resize(1200, Jimp.AUTO).grayscale().contrast(0.6)]  : []),
+    base.clone(),
+    base.clone().grayscale(),
+    base.clone().grayscale().contrast(0.4),
+    base.clone().grayscale().contrast(0.6),
+    base.clone().grayscale().contrast(0.8),
+    base.clone().grayscale().contrast(0.9).brightness(0.05),
+    base.clone().grayscale().contrast(0.5).brightness(-0.1),
+    // Sharpened variants — help with blurry/angled photos
+    base.clone().grayscale().convolute([[0,-1,0],[-1,5,-1],[0,-1,0]]),
+    base.clone().grayscale().contrast(0.6).convolute([[0,-1,0],[-1,5,-1],[0,-1,0]]),
   ]
 }
 
@@ -113,13 +137,17 @@ function decodeQR(img, inv) {
   } catch { return null }
 }
 
+// All 8 angles: 0°, 45°, 90°, 135°, 180°, 225°, 270°, 315°
+const QR_ANGLES = [0, 45, 90, 135, 180, 225, 270, 315]
+
 async function scanQR(img) {
   for (const crop of getCrops(img)) {
     for (const v of preprocess(crop)) {
       for (const inv of ['dontInvert', 'onlyInvert']) {
-        const r0 = decodeQR(v, inv); if (r0) return r0
-        for (const angle of [90, 180, 270]) {
-          const r = decodeQR(v.clone().rotate(angle), inv); if (r) return r
+        for (const angle of QR_ANGLES) {
+          const rotated = angle === 0 ? v : v.clone().rotate(angle)
+          const r = decodeQR(rotated, inv)
+          if (r) return r
         }
       }
     }
@@ -133,17 +161,27 @@ async function getZxing() {
   return _readBarcodes
 }
 
+// Barcode angles: 0°, 45°, 90°, 135°, 180°, 270° — cover tilted barcodes
+const BC_ANGLES = [0, 45, 90, 135, 180, 270]
+
 async function scanBarcode(img) {
   try {
     const readBarcodes = await getZxing()
     for (const crop of getCrops(img)) {
       for (const v of preprocess(crop)) {
-        for (const angle of [0, 90, 180, 270]) {
-          const rotated = angle === 0 ? v : v.clone().rotate(angle)
-          const imageData = { data: new Uint8ClampedArray(rotated.bitmap.data.buffer), width: rotated.bitmap.width, height: rotated.bitmap.height }
-          const results = await readBarcodes(imageData, { tryHarder: true })
-          const text = results?.[0]?.text?.trim()
-          if (text) return text
+        for (const angle of BC_ANGLES) {
+          try {
+            const rotated = angle === 0 ? v : v.clone().rotate(angle)
+            if (!rotated?.bitmap?.width) continue
+            const imageData = {
+              data:   new Uint8ClampedArray(rotated.bitmap.data.buffer),
+              width:  rotated.bitmap.width,
+              height: rotated.bitmap.height,
+            }
+            const results = await readBarcodes(imageData, { tryHarder: true })
+            const text = results?.[0]?.text?.trim()
+            if (text) return text
+          } catch { /* skip this variant */ }
         }
       }
     }
