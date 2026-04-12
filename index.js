@@ -105,9 +105,12 @@ function preprocess(crop) {
 }
 
 function decodeQR(img, inv) {
-  const { data, width, height } = img.bitmap
-  const r = jsQR(data, width, height, { inversionAttempts: inv })
-  return r ? r.data.trim() : null
+  try {
+    if (!img?.bitmap?.width || !img?.bitmap?.height || !img?.bitmap?.data) return null
+    const { data, width, height } = img.bitmap
+    const r = jsQR(data, width, height, { inversionAttempts: inv })
+    return r ? r.data.trim() : null
+  } catch { return null }
 }
 
 async function scanQR(img) {
