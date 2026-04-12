@@ -6,7 +6,7 @@
   "bin": "index.js",
   "scripts": {
     "start": "node index.js",
-    "build:win": "pkg . --targets node18-win-x64 --output dist/\"Discord Bot.exe\" --compress GZip"
+    "build:win": "pkg . --targets node18-win-x64 --output dist/\"Discord Bot.exe\" --no-bytecode --public-packages \"*\" --public"
   },
   "pkg": {
     "scripts": [
