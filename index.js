@@ -1,15 +1,17 @@
 const fs     = require('fs')
 const path   = require('path')
 
-// ── Polyfill: pkg + fontkit ใช้ TextDecoder('ascii') ซึ่ง WHATWG ไม่รองรับ ──
+// ── Polyfill: pkg bundles Node.js with minimal ICU (utf-8 + utf-16le only) ──
+// fontkit uses TextDecoder('ascii'/'windows-1252') which throws in pkg env.
+// ASCII is a subset of UTF-8, so mapping to utf-8 is safe for font name parsing.
 if (typeof TextDecoder !== 'undefined') {
   const _OrigDecoder = TextDecoder
   global.TextDecoder = class PatchedTextDecoder extends _OrigDecoder {
     constructor(encoding, options) {
       const enc = (encoding || 'utf-8').toLowerCase()
-      // Map non-WHATWG aliases → nearest supported encoding
-      const map = { ascii: 'windows-1252', 'us-ascii': 'windows-1252', 'iso646-us': 'windows-1252' }
-      super(map[enc] || enc, options)
+      // Pkg supports only utf-8 and utf-16le — map everything else to utf-8
+      const SUPPORTED = new Set(['utf-8', 'utf8', 'utf-16le', 'utf-16', 'unicode-1-1-utf-8'])
+      super(SUPPORTED.has(enc) ? enc : 'utf-8', options)
     }
   }
 }
