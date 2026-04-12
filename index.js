@@ -1,6 +1,19 @@
 const fs     = require('fs')
 const path   = require('path')
 
+// ── Polyfill: pkg + fontkit ใช้ TextDecoder('ascii') ซึ่ง WHATWG ไม่รองรับ ──
+if (typeof TextDecoder !== 'undefined') {
+  const _OrigDecoder = TextDecoder
+  global.TextDecoder = class PatchedTextDecoder extends _OrigDecoder {
+    constructor(encoding, options) {
+      const enc = (encoding || 'utf-8').toLowerCase()
+      // Map non-WHATWG aliases → nearest supported encoding
+      const map = { ascii: 'windows-1252', 'us-ascii': 'windows-1252', 'iso646-us': 'windows-1252' }
+      super(map[enc] || enc, options)
+    }
+  }
+}
+
 // ── Runtime directory: ใช้ directory ของ .exe เมื่อรันผ่าน pkg ──────────────
 const RUNTIME_DIR = process.pkg ? path.dirname(process.execPath) : __dirname
 
