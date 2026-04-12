@@ -168,12 +168,12 @@ async function decodeAny(imageData) {
 // sharp runs natively (libvips) — เร็วกว่า jimp 10× และ threshold ตัด glare ได้จริง
 async function sharpToImageData(input, options = {}) {
   try {
-    const { width, threshold = false, sharpen = false } = options
+    const { width, threshold = false, thresholdValue = 128, sharpen = false } = options
     let p = sharp(input).rotate()  // auto-rotate by EXIF
     if (width)    p = p.resize(width, null, { fit: 'inside', withoutEnlargement: false })
     if (sharpen)  p = p.sharpen({ sigma: 1.5, m1: 1, m2: 2 })
     p = p.grayscale()
-    if (threshold) p = p.threshold(128)  // binary: ตัด glare ออกเป็น pure black/white
+    if (threshold) p = p.threshold(thresholdValue)  // binary: ตัด glare ออกเป็น pure black/white
     const { data, info } = await p.raw().toBuffer({ resolveWithObject: true })
     // grayscale raw = 1 channel → แปลงเป็น RGBA สำหรับ zxing/jsQR
     const rgba = Buffer.alloc(info.width * info.height * 4)
@@ -196,30 +196,75 @@ async function sharpCrop(buffer, meta, x, y, w, h) {
   } catch { return null }
 }
 
-// ── Google Vision fallback — locate label bounding box ───────────────────────
-async function visionLocateLabel(imageBuffer) {
+// ── Try multiple preprocessing variants on a crop — ทดสอบ 4 แบบพร้อมกัน ──────
+// เหตุผล: barcode บางใบมีสีเทา ไม่ใช่ดำสนิท — threshold ค่าเดียวอาจทำลาย barcode ได้
+async function decodeCrop(cropBuffer, targetW) {
+  const tw = Math.min(targetW, 1400)
+  const [id0, id1, id2, id3] = await Promise.all([
+    sharpToImageData(cropBuffer, { width: tw, sharpen: true }),                              // sharpen only
+    sharpToImageData(cropBuffer, { width: tw, sharpen: true, threshold: true, thresholdValue: 160 }), // loose binary
+    sharpToImageData(cropBuffer, { width: tw, sharpen: true, threshold: true, thresholdValue: 128 }), // strict binary
+    sharpToImageData(cropBuffer, { width: tw }),                                             // raw grayscale
+  ])
+  for (const id of [id0, id1, id2, id3]) {
+    if (!id) continue
+    const r = await decodeAny(id)
+    if (r) return r
+  }
+  return null
+}
+
+// ── Google Vision — scan each text BLOCK individually (not combined bbox) ─────
+// เหตุผล: combined bbox ครอบคลุมทั้งกล่องสินค้า, ต้อง scan แต่ละ block แยก
+async function visionScanBlocks(baseBuffer, baseMeta) {
   try {
-    const { google } = require('googleapis')
-    const Sheets = require('./sheets')
     if (!Sheets.SHEET_ID()) return null  // ไม่มี credentials ให้ skip
-    const auth = (() => {
-      const credentials = process.env.GOOGLE_SERVICE_ACCOUNT
-        ? JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT)
-        : JSON.parse(fs.readFileSync(path.join(RUNTIME_DIR, 'credentials.json'), 'utf8'))
-      return new google.auth.GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/cloud-platform'] })
-    })()
+    const { google } = require('googleapis')
+    const credentials = process.env.GOOGLE_SERVICE_ACCOUNT
+      ? JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT)
+      : JSON.parse(fs.readFileSync(path.join(RUNTIME_DIR, 'credentials.json'), 'utf8'))
+    const auth = new google.auth.GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/cloud-platform'] })
     const vision = google.vision({ version: 'v1', auth })
-    const base64 = imageBuffer.toString('base64')
+
+    // ส่ง baseBuffer (normalized) เพื่อให้ coordinate ตรงกับ baseMeta
+    const base64 = baseBuffer.toString('base64')
     const res = await vision.images.annotate({
       requestBody: { requests: [{ image: { content: base64 }, features: [{ type: 'DOCUMENT_TEXT_DETECTION' }] }] }
     })
+
     const pages = res.data.responses?.[0]?.fullTextAnnotation?.pages
     if (!pages?.length) return null
-    // หา bounding box ของ text block ทั้งหมด
-    const verts = res.data.responses[0].textAnnotations?.[0]?.boundingPoly?.vertices
-    if (!verts?.length) return null
-    const xs = verts.map(v => v.x || 0), ys = verts.map(v => v.y || 0)
-    return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) }
+
+    // ดึง block แต่ละอัน — แต่ละ block คือ text region บน label จริงๆ
+    const blocks = pages.flatMap(p => p.blocks || [])
+    if (!blocks.length) return null
+
+    // เรียง block จากใหญ่ไปเล็ก (label ที่มี barcode มักเป็น block ใหญ่)
+    const sorted = blocks
+      .map(b => {
+        const verts = b.boundingBox?.vertices || []
+        if (verts.length < 4) return null
+        const xs = verts.map(v => v.x || 0), ys = verts.map(v => v.y || 0)
+        const x = Math.min(...xs), y = Math.min(...ys)
+        const w = Math.max(...xs) - x, h = Math.max(...ys) - y
+        return { x, y, w, h, area: w * h }
+      })
+      .filter(b => b && b.w > 40 && b.h > 20)
+      .sort((a, b) => b.area - a.area)
+
+    const padding = 40
+    for (const { x, y, w, h } of sorted) {
+      // ขยาย bbox นิดหน่อยเพื่อจับ barcode/QR ที่อยู่ติดกับ text block
+      const cx = Math.max(0, x - padding)
+      const cy = Math.max(0, y - padding)
+      const cw = Math.min(baseMeta.width - cx, w + padding * 4)
+      const ch = Math.min(baseMeta.height - cy, h + padding * 4)
+      const crop = await sharpCrop(baseBuffer, baseMeta, cx, cy, cw, ch)
+      if (!crop) continue
+      const result = await decodeCrop(crop, Math.max(cw * 3, 600))
+      if (result) return result
+    }
+    return null
   } catch { return null }
 }
 
@@ -240,58 +285,57 @@ async function scan(imageBuffer) {
 
   // ── STAGE 1: ทั้งรูป — 4 variants พร้อมกัน ────────────────────────────────
   const stage1 = await Promise.all([
-    sharpToImageData(baseBuffer),                                         // raw
-    sharpToImageData(baseBuffer, { sharpen: true }),                      // sharpen
-    sharpToImageData(baseBuffer, { threshold: true }),                    // binary (glare killer)
-    sharpToImageData(baseBuffer, { sharpen: true, threshold: true }),     // sharpen + binary
+    sharpToImageData(baseBuffer),
+    sharpToImageData(baseBuffer, { sharpen: true }),
+    sharpToImageData(baseBuffer, { threshold: true, thresholdValue: 160 }),
+    sharpToImageData(baseBuffer, { sharpen: true, threshold: true, thresholdValue: 128 }),
   ])
   for (const id of stage1) { if (!id) continue; const r = await decodeAny(id); if (r) return { text: r, type: 'Code' } }
 
   // ── STAGE 2: overlapping zones + zoom — concurrent ────────────────────────
+  // เพิ่ม zone ครอบคลุมจุดที่ label มักอยู่ (กลางซ้าย, กลางขวา, กลางจริงๆ)
   const zones = [
-    [0,       0,       BW*0.6,  BH*0.6 ],
-    [BW*0.4,  0,       BW*0.6,  BH*0.6 ],
-    [0,       BH*0.4,  BW*0.6,  BH*0.6 ],
-    [BW*0.4,  BH*0.4,  BW*0.6,  BH*0.6 ],
-    [BW*0.1,  BH*0.1,  BW*0.8,  BH*0.8 ],
-    [0,       BH*0.2,  BW,      BH*0.6 ],
+    [0,        0,       BW*0.6,  BH*0.6 ],   // top-left 60%
+    [BW*0.4,   0,       BW*0.6,  BH*0.6 ],   // top-right 60%
+    [0,        BH*0.4,  BW*0.6,  BH*0.6 ],   // bottom-left 60%
+    [BW*0.4,   BH*0.4,  BW*0.6,  BH*0.6 ],   // bottom-right 60%
+    [BW*0.1,   BH*0.1,  BW*0.8,  BH*0.8 ],   // inner 80%
+    [0,        BH*0.2,  BW,      BH*0.6  ],   // full-width center strip
+    [BW*0.15,  BH*0.25, BW*0.7,  BH*0.5  ],   // ✦ center focus — label มักอยู่ที่นี่
+    [0,        0,       BW*0.55, BH*0.55 ],   // offset top-left
+    [BW*0.45,  BH*0.45, BW*0.55, BH*0.55 ],  // offset bottom-right
   ]
   const stage2 = await Promise.all(zones.map(async ([x, y, w, h]) => {
     const crop = await sharpCrop(baseBuffer, baseMeta, x, y, w, h)
     if (!crop) return null
-    // zoom 2× ให้ QR เล็กมี pixel พอ
-    const id = await sharpToImageData(crop, { width: Math.min(Math.round(w)*2, 1200), sharpen: true, threshold: true })
-    return id ? decodeAny(id) : null
+    const targetW = Math.min(Math.round(w) * 3, 1400)  // zoom 3× (เดิม 2×)
+    return decodeCrop(crop, targetW)
   }))
   const found2 = stage2.find(r => r)
   if (found2) return { text: found2, type: 'Code' }
 
-  // ── STAGE 3: 3×3 grid + zoom 3× — concurrent ─────────────────────────────
-  const gw = Math.floor(BW/3), gh = Math.floor(BH/3)
-  const cells = []
-  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) cells.push([c*gw, r*gh, gw, gh])
+  // ── STAGE 3: 4×4 grid + zoom 4× — overlapping offset grid ───────────────
+  // 4×4 แทน 3×3 ให้ cell เล็กลง → barcode ไม่ถูกตัดข้ามกัน
+  // + offset grid (เลื่อน 0.5 cell) เพื่อให้ไม่มีจุดอับ
+  const gridCells = []
+  const GCOLS = 4, GROWS = 4
+  const gcw = BW / GCOLS, gch = BH / GROWS
+  for (let r = 0; r < GROWS; r++) for (let c = 0; c < GCOLS; c++) gridCells.push([c*gcw, r*gch, gcw, gch])
+  // offset grid (เลื่อนครึ่ง cell)
+  for (let r = 0; r < GROWS - 1; r++) for (let c = 0; c < GCOLS - 1; c++)
+    gridCells.push([(c + 0.5)*gcw, (r + 0.5)*gch, gcw, gch])
 
-  const stage3 = await Promise.all(cells.map(async ([x, y, w, h]) => {
+  const stage3 = await Promise.all(gridCells.map(async ([x, y, w, h]) => {
     const crop = await sharpCrop(baseBuffer, baseMeta, x, y, w, h)
     if (!crop) return null
-    const id = await sharpToImageData(crop, { width: Math.min(gw*3, 900), sharpen: true, threshold: true })
-    return id ? decodeAny(id) : null
+    return decodeCrop(crop, Math.min(Math.round(w) * 4, 1200))  // zoom 4× (เดิม 3×)
   }))
   const found3 = stage3.find(r => r)
   if (found3) return { text: found3, type: 'Code' }
 
-  // ── STAGE 4 (fallback): Google Vision หา bbox ของฉลาก แล้ว crop + scan ───
-  const bbox = await visionLocateLabel(imageBuffer)
-  if (bbox) {
-    const padding = 20
-    const crop = await sharpCrop(baseBuffer, baseMeta,
-      bbox.x - padding, bbox.y - padding,
-      bbox.w + padding*2, bbox.h + padding*2)
-    if (crop) {
-      const id = await sharpToImageData(crop, { width: 1200, sharpen: true, threshold: true })
-      if (id) { const r = await decodeAny(id); if (r) return { text: r, type: 'Code' } }
-    }
-  }
+  // ── STAGE 4 (fallback): Google Vision — scan แต่ละ text block แยกกัน ──────
+  const visionResult = await visionScanBlocks(baseBuffer, baseMeta)
+  if (visionResult) return { text: visionResult, type: 'Code' }
 
   return null
 }
