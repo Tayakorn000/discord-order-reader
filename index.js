@@ -754,8 +754,15 @@ client.on(Events.MessageCreate, async (message) => {
 // ลด overlap window จาก ~30s → ~3s
 const http = require('http')
 const _healthServer = http.createServer((req, res) => {
-  if (req.url === '/health') { res.writeHead(200).end('ok') }
-  else { res.writeHead(404).end() }
+  if (req.url === '/health') {
+    // ส่ง 200 เฉพาะเมื่อ Discord client เชื่อมต่อสำเร็จแล้วเท่านั้น
+    // Railway จะ SIGTERM instance เก่าทันทีที่เห็น 200
+    // → ทำให้ instance เก่าปิด Discord connection ก่อนที่ instance ใหม่จะรับงาน
+    if (client.isReady()) res.writeHead(200).end('ok')
+    else                  res.writeHead(503).end('starting')
+  } else {
+    res.writeHead(404).end()
+  }
 })
 _healthServer.listen(process.env.PORT || 3000, () => {
   console.log(`🌐 Health server on :${process.env.PORT || 3000}`)
