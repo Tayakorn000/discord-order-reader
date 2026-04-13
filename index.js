@@ -478,20 +478,38 @@ client.once(Events.ClientReady, () => {
   console.log(`📦  Watching channel ${CHANNEL_ID}`)
 })
 
-// ── Deduplication: ป้องกัน bot ตอบซ้ำเมื่อ Railway restart overlap หรือ Discord reconnect ──
-const _seenMessages = new Map()  // messageId → timestamp
-const SEEN_TTL = 5 * 60 * 1000  // 5 min
+// ── Deduplication layer 1: in-memory (ป้องกัน Discord reconnect replay) ────────
+const _seenMessages = new Map()
+const SEEN_TTL = 5 * 60 * 1000
 
 function markSeen(id) {
   _seenMessages.set(id, Date.now())
-  // ล้าง entry เก่าทุกครั้ง
   for (const [k, t] of _seenMessages) { if (Date.now() - t > SEEN_TTL) _seenMessages.delete(k) }
+}
+
+// ── Deduplication layer 2: Discord reaction lock (cross-instance) ─────────────
+// วิธีนี้ทำงานข้าม Railway instances: ถ้า instance อื่น react '🔍' ไปแล้ว → skip
+// Railway overlap window ~10-30 วินาที, random jitter ช่วยให้ instance แรกชนะ
+async function claimMessage(message) {
+  try {
+    // สุ่ม delay เล็กน้อยเพื่อให้ instance ที่ boot เร็วกว่าชนะ race
+    await new Promise(r => setTimeout(r, Math.random() * 120))
+    // fetch fresh — ไม่ใช้ cache เพราะ instance อื่นอาจ react ไปแล้ว
+    const fresh = await message.fetch(true)
+    const existing = fresh.reactions.cache.get('🔍')
+    if (existing) {
+      const users = await existing.users.fetch()
+      if (users.has(client.user.id)) return false  // อีก instance claim ไปแล้ว
+    }
+    await message.react('🔍')
+    return true
+  } catch { return true }  // ถ้า fetch ล้มเหลว ให้ process ต่อ (fallback)
 }
 
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return
   if (message.channelId !== CHANNEL_ID) return
-  if (_seenMessages.has(message.id)) return  // already handled — skip
+  if (_seenMessages.has(message.id)) return
   markSeen(message.id)
 
   const text = message.content.trim()
@@ -640,7 +658,8 @@ client.on(Events.MessageCreate, async (message) => {
   const imageFiles = [...message.attachments.values()].filter(a => a.contentType?.startsWith('image/'))
   if (imageFiles.length === 0) return
 
-  try { await message.react('🔍') } catch {}
+  // Cross-instance lock: ถ้า instance อื่น claim ไปแล้ว → หยุด ไม่ process ซ้ำ
+  if (!await claimMessage(message)) return
 
   const now = new Date().toISOString()
 
@@ -728,6 +747,18 @@ client.on(Events.MessageCreate, async (message) => {
   const okCount = results.filter(r => r.status === 'ok').length
   const header  = `📦 สแกน **${total}** รูป | ✅ เข้ารับ **${okCount}** | ❌ อ่านไม่ได้ **${noRead.length}**`
   await message.reply([header, ...lines].join('\n'))
+})
+
+// ── Health-check HTTP server (Railway ใช้เพื่อรู้ว่า instance ใหม่ ready แล้ว) ──
+// เมื่อ Railway เห็น /health ตอบ 200 จาก instance ใหม่ จะ stop instance เก่าทันที
+// ลด overlap window จาก ~30s → ~3s
+const http = require('http')
+const _healthServer = http.createServer((req, res) => {
+  if (req.url === '/health') { res.writeHead(200).end('ok') }
+  else { res.writeHead(404).end() }
+})
+_healthServer.listen(process.env.PORT || 3000, () => {
+  console.log(`🌐 Health server on :${process.env.PORT || 3000}`)
 })
 
 // ── Start ─────────────────────────────────────────────────────────────────────
