@@ -650,14 +650,19 @@ client.on(Events.MessageCreate, async (message) => {
 
       // ── Google Sheets (ถ้ามี SHEET_ID) ──
       let sheetsMsg = ''
+      console.log('SHEET_ID check:', Sheets.SHEET_ID() ? 'SET' : 'NOT SET')
       if (Sheets.SHEET_ID()) {
         try {
+          console.log('Writing', trackingNumbers.length, 'parcels to Google Sheets...')
           const { added, tab } = await Sheets.writeParcels(trackingNumbers)
+          console.log('Sheets write OK:', added, 'added to tab', tab)
           sheetsMsg = `\n☁️ Google Sheet: Tab **${tab}** | เพิ่มใหม่ **${added}**`
         } catch (e) {
           console.error('Sheets write error:', e.message)
           sheetsMsg = `\n⚠️ Google Sheet error: ${e.message}`
         }
+      } else {
+        console.log('Skipping Sheets — GOOGLE_SHEET_ID not set')
       }
 
       await message.reply(
