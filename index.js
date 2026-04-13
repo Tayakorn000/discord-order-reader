@@ -478,9 +478,21 @@ client.once(Events.ClientReady, () => {
   console.log(`📦  Watching channel ${CHANNEL_ID}`)
 })
 
+// ── Deduplication: ป้องกัน bot ตอบซ้ำเมื่อ Railway restart overlap หรือ Discord reconnect ──
+const _seenMessages = new Map()  // messageId → timestamp
+const SEEN_TTL = 5 * 60 * 1000  // 5 min
+
+function markSeen(id) {
+  _seenMessages.set(id, Date.now())
+  // ล้าง entry เก่าทุกครั้ง
+  for (const [k, t] of _seenMessages) { if (Date.now() - t > SEEN_TTL) _seenMessages.delete(k) }
+}
+
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return
   if (message.channelId !== CHANNEL_ID) return
+  if (_seenMessages.has(message.id)) return  // already handled — skip
+  markSeen(message.id)
 
   const text = message.content.trim()
 
