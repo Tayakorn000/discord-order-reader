@@ -113,22 +113,38 @@ function saveDb(db) {
 // ── Excel parser ──────────────────────────────────────────────────────────────
 function parseExcel(buffer) {
   const wb  = XLSX.read(buffer, { type: 'buffer' })
-  const ws  = wb.Sheets[wb.SheetNames[0]]
-  const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' })
 
-  let headerRow = -1, parcelCol = -1
-  for (let i = 0; i < raw.length; i++) {
-    const col = raw[i].findIndex(v => String(v).trim() === 'พัสดุ')
-    if (col !== -1) { headerRow = i; parcelCol = col; break }
-  }
-  if (headerRow === -1) return { error: 'ไม่พบคอลัมน์ "พัสดุ" ในไฟล์' }
+  // ค้นหาทุก sheet — ไม่ใช่แค่ sheet แรก (Google Sheets export อาจมีหลาย tab)
+  const allTrackingNumbers = []
+  let found = false
 
-  const trackingNumbers = []
-  for (let i = headerRow + 1; i < raw.length; i++) {
-    const val = String(raw[i][parcelCol] ?? '').trim()
-    if (val) trackingNumbers.push(val)
+  for (const sheetName of wb.SheetNames) {
+    const ws  = wb.Sheets[sheetName]
+    const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' })
+
+    let headerRow = -1, parcelCol = -1
+    for (let i = 0; i < raw.length; i++) {
+      // รองรับทั้ง "พัสดุ" และ "หมายเลขพัสดุ"
+      const col = raw[i].findIndex(v => {
+        const s = String(v).trim()
+        return s === 'พัสดุ' || s === 'หมายเลขพัสดุ'
+      })
+      if (col !== -1) { headerRow = i; parcelCol = col; break }
+    }
+    if (headerRow === -1) continue  // sheet นี้ไม่มีคอลัมน์ ข้ามไป
+
+    found = true
+    for (let i = headerRow + 1; i < raw.length; i++) {
+      const val = String(raw[i][parcelCol] ?? '').trim()
+      if (val) allTrackingNumbers.push(val)
+    }
   }
-  return { trackingNumbers }
+
+  if (!found) return { error: 'ไม่พบคอลัมน์ "พัสดุ" หรือ "หมายเลขพัสดุ" ในไฟล์' }
+
+  // ตัด duplicate
+  const unique = [...new Set(allTrackingNumbers)]
+  return { trackingNumbers: unique }
 }
 
 // ── QR / Barcode scanner ──────────────────────────────────────────────────────
