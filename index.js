@@ -621,32 +621,31 @@ client.on(Events.MessageCreate, async (message) => {
       if (error) { await message.reply(`❌ ${error}`); return }
       if (!trackingNumbers.length) { await message.reply('❌ พบคอลัมน์ "พัสดุ" แต่ไม่มีข้อมูล'); return }
 
-      // ── Google Sheets mode ──
-      if (Sheets.SHEET_ID()) {
-        try {
-          await message.react('⏳')
-          const { added, tab } = await Sheets.writeParcels(trackingNumbers)
-          await message.reply(
-            `✅ เขียนเข้า Google Sheet สำเร็จ\n` +
-            `📄 Tab: **${tab}** | 📦 ทั้งหมด: **${trackingNumbers.length}** | เพิ่มใหม่: **${added}**`
-          )
-        } catch (e) {
-          console.error('Sheets write error:', e.message)
-          await message.reply(`❌ Google Sheets error: ${e.message}`)
-        }
-        return
-      }
+      await message.react('⏳')
 
-      // ── JSON db fallback ──
+      // ── JSON db (เก็บเสมอ เป็น backup) ──
       const date = new Date().toLocaleDateString('th-TH')
       const db   = loadDb()
-      let added  = 0
+      let addedLocal = 0
       for (const tn of trackingNumbers) {
-        if (!db.parcels[tn]) { db.parcels[tn] = { date, received: false }; added++ }
+        if (!db.parcels[tn]) { db.parcels[tn] = { date, received: false }; addedLocal++ }
       }
       saveDb(db)
+
+      // ── Google Sheets (ถ้ามี SHEET_ID) ──
+      let sheetsMsg = ''
+      if (Sheets.SHEET_ID()) {
+        try {
+          const { added, tab } = await Sheets.writeParcels(trackingNumbers)
+          sheetsMsg = `\n☁️ Google Sheet: Tab **${tab}** | เพิ่มใหม่ **${added}**`
+        } catch (e) {
+          console.error('Sheets write error:', e.message)
+          sheetsMsg = `\n⚠️ Google Sheet error: ${e.message}`
+        }
+      }
+
       await message.reply(
-        `✅ โหลดข้อมูลสำเร็จ\n📦 พบพัสดุ **${trackingNumbers.length}** รายการ (เพิ่มใหม่ **${added}**)\n📅 วันที่: ${date}`
+        `✅ โหลดข้อมูลสำเร็จ\n📦 พบพัสดุ **${trackingNumbers.length}** รายการ (เพิ่มใหม่ **${addedLocal}**)\n📅 วันที่: ${date}${sheetsMsg}`
       )
     } catch (err) {
       console.error('Excel error:', err)
