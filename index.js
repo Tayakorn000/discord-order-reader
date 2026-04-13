@@ -478,7 +478,26 @@ client.once(Events.ClientReady, () => {
   console.log(`📦  Watching channel ${CHANNEL_ID}`)
 })
 
-// ── Deduplication layer 1: in-memory (ป้องกัน Discord reconnect replay) ────────
+// ── Graceful shutdown: ปิด Discord connection ทันทีเมื่อ Railway ส่ง SIGTERM ────
+// Railway flow: start new instance → wait for /health 200 → SIGTERM old instance
+// เมื่อ old instance ได้ SIGTERM → destroy() → Discord ไม่ส่ง event ให้อีกแล้ว
+// ผล: overlap window เป็น 0 ไม่มี double-reply อีก
+let isShuttingDown = false
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received — closing Discord connection immediately')
+  isShuttingDown = true
+  try { client.destroy() } catch {}
+  try { _healthServer?.close() } catch {}
+  // ให้เวลา in-flight operations เสร็จก่อน exit
+  setTimeout(() => process.exit(0), 8_000)
+})
+process.on('SIGINT', () => {
+  isShuttingDown = true
+  try { client.destroy() } catch {}
+  process.exit(0)
+})
+
+// ── Deduplication: in-memory (ป้องกัน Discord reconnect replay ภายใน instance เดียว) ──
 const _seenMessages = new Map()
 const SEEN_TTL = 5 * 60 * 1000
 
@@ -487,26 +506,8 @@ function markSeen(id) {
   for (const [k, t] of _seenMessages) { if (Date.now() - t > SEEN_TTL) _seenMessages.delete(k) }
 }
 
-// ── Deduplication layer 2: Discord reaction lock (cross-instance) ─────────────
-// วิธีนี้ทำงานข้าม Railway instances: ถ้า instance อื่น react '🔍' ไปแล้ว → skip
-// Railway overlap window ~10-30 วินาที, random jitter ช่วยให้ instance แรกชนะ
-async function claimMessage(message) {
-  try {
-    // สุ่ม delay เล็กน้อยเพื่อให้ instance ที่ boot เร็วกว่าชนะ race
-    await new Promise(r => setTimeout(r, Math.random() * 120))
-    // fetch fresh — ไม่ใช้ cache เพราะ instance อื่นอาจ react ไปแล้ว
-    const fresh = await message.fetch(true)
-    const existing = fresh.reactions.cache.get('🔍')
-    if (existing) {
-      const users = await existing.users.fetch()
-      if (users.has(client.user.id)) return false  // อีก instance claim ไปแล้ว
-    }
-    await message.react('🔍')
-    return true
-  } catch { return true }  // ถ้า fetch ล้มเหลว ให้ process ต่อ (fallback)
-}
-
 client.on(Events.MessageCreate, async (message) => {
+  if (isShuttingDown) return           // หยุดรับ event ทันทีเมื่อกำลัง shutdown
   if (message.author.bot) return
   if (message.channelId !== CHANNEL_ID) return
   if (_seenMessages.has(message.id)) return
@@ -658,8 +659,7 @@ client.on(Events.MessageCreate, async (message) => {
   const imageFiles = [...message.attachments.values()].filter(a => a.contentType?.startsWith('image/'))
   if (imageFiles.length === 0) return
 
-  // Cross-instance lock: ถ้า instance อื่น claim ไปแล้ว → หยุด ไม่ process ซ้ำ
-  if (!await claimMessage(message)) return
+  try { await message.react('🔍') } catch {}
 
   const now = new Date().toISOString()
 
