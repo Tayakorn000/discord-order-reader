@@ -152,4 +152,4 @@ Helper scripts for Windows operators:
 
 ## License
 
-Proprietary. All rights reserved.
+Tayakorn Wetchakun
